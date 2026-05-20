@@ -1,0 +1,14 @@
+﻿{
+  "name": "amanvermez-sahibinden-bot",
+  "version": "1.0.0",
+  "description": "Amanvermez Gayrimenkul Otomatik İlan Dedektifi",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.4.0",
+    "cheerio": "^1.0.0-rc.12",
+    "firebase-admin": "^11.9.0"
+  }
+}
