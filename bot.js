@@ -1,28 +1,30 @@
 ﻿const axios = require('axios');
 const cheerio = require('cheerio');
-const admin = require('firebase-admin');
+const { initializeApp } = require('firebase/app');
+const { getDatabase, ref, query, orderByChild, equalTo, get, push } = require('firebase/database');
+const express = require('express');
 
-// Sizin Firebase Veritabanı Yapılandırmanız
+// Sizin Ofis Paneline Ait Tam Firebase Yapılandırması (Şifre istemez)
 const firebaseConfig = {
-    databaseURL: "https://emlak-panel-default-rtdb.europe-west1.firebasedatabase.app"
+    apiKey: "AIzaSyB1Ucw0oOV6JlWUwgPuOgv2Iou_jQumtmQ",
+    authDomain: "emlak-panel.firebaseapp.com",
+    databaseURL: "https://emlak-panel-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "emlak-panel",
+    storageBucket: "emlak-panel.firebasestorage.app",
+    messagingSenderId: "465170015059",
+    appId: "1:465170015059:web:0050cbec9b3506e86f37a6"
 };
 
-// Firebase'i Başlatma
-admin.initializeApp({
-    credential: admin.credential.applicationDefault(), // Bulut sunucusunda otomatik yetki alacak
-    databaseURL: firebaseConfig.databaseURL
-});
+// Firebase Başlatma
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const portfoyRef = ref(db, 'emlak_portfoyleri');
 
-const db = admin.database();
-const portfoyRef = db.ref('emlak_portfoyleri');
-
-// Sizin Sahibinden Osmaniye Merkez Kiralık Filtre Linkiniz
 const TARGET_URL = "https://www.sahibinden.com/kiralik/osmaniye-merkez/sahibinden";
 
 async function ilanlariKontrolEt() {
     console.log(`[${new Date().toLocaleString('tr-TR')}] Osmaniye Merkez ilanları kontrol ediliyor...`);
     try {
-        // Sahibinden botları engellemesin diye gerçek kullanıcı taklidi yapıyoruz (User-Agent)
         const response = await axios.get(TARGET_URL, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
@@ -38,17 +40,17 @@ async function ilanlariKontrolEt() {
             return;
         }
 
-        ilanSatirlari.each((index, element) => {
+        ilanSatirlari.each(async (index, element) => {
             const ilanNo = $(element).attr('data-id');
             if (!ilanNo) return;
 
             const baslikElement = $(element).find('td.searchResultsTitleValue a');
+            if (!baslikElement.length) return;
             let ilanBaslik = baslikElement.text().replace(/\s+/g, ' ').trim().toUpperCase();
 
             const fiyatElement = $(element).find('td.searchResultsPriceValue');
             let fiyat = fiyatElement ? fiyatElement.text().replace(/\s+/g, ' ').trim().replace(" TL", "") : "0";
 
-            // Tablodaki hücreleri tarayarak M2 ve Oda Sayısını Alıyoruz
             const hucreler = $(element).find('td');
             let metrekare = "Belirtilmemiş";
             let odaSayisi = "2+1";
@@ -58,29 +60,29 @@ async function ilanlariKontrolEt() {
                 odaSayisi = $(hucreler[5]).text().trim();
             }
 
-            // Veritabanında kontrol et, yoksa otomatik ekle
-            portfoyRef.orderByChild('ilan_no').equalTo(ilanNo).once('value', (snapshot) => {
-                if (!snapshot.exists()) {
-                    const yeniPortfoy = {
-                        ilan_baslik: "🔴 [OTOMATİK] " + ilanBaslik,
-                        oda_sayisi: odaSayisi,
-                        metrekare: metrekare,
-                        kat_numarasi: "Bulut Bot",
-                        fiyat: fiyat,
-                        portfoy_durumu: "KİRALIK",
-                        ilan_no: ilanNo,
-                        sahip_bilgi: "SAHİBİNDEN (BULUT)",
-                        adres: "OSMANİYE / MERKEZ",
-                        notlar: "7/24 Bulut sistemi tarafından otomatik yakalanan ilan.",
-                        tarih: new Date().toLocaleString('tr-TR'),
-                        timestamp: Date.now()
-                    };
+            // Hafifletilmiş Yeni Sorgu Mantığı
+            const ilanSorgu = query(portfoyRef, orderByChild('ilan_no'), equalTo(ilanNo));
+            const snapshot = await get(ilanSorgu);
 
-                    portfoyRef.push(yeniPortfoy).then(() => {
-                        console.log(`✅ Havuza yeni ilan eklendi: No ${ilanNo} - ${ilanBaslik}`);
-                    });
-                }
-            });
+            if (!snapshot.exists()) {
+                const yeniPortfoy = {
+                    ilan_baslik: "🔴 [OTOMATİK] " + ilanBaslik,
+                    oda_sayisi: odaSayisi,
+                    metrekare: metrekare,
+                    kat_numarasi: "Bulut Bot",
+                    fiyat: fiyat,
+                    portfoy_durumu: "KİRALIK",
+                    ilan_no: ilanNo,
+                    sahip_bilgi: "SAHİBİNDEN (BULUT)",
+                    adres: "OSMANİYE / MERKEZ",
+                    notlar: "7/24 Bulut sistemi tarafından otomatik yakalanan ilan.",
+                    tarih: new Date().toLocaleString('tr-TR'),
+                    timestamp: Date.now()
+                };
+
+                await push(portfoyRef, yeniPortfoy);
+                console.log(`✅ Havuza yeni ilan eklendi: No ${ilanNo} - ${ilanBaslik}`);
+            }
         });
 
     } catch (error) {
@@ -88,12 +90,11 @@ async function ilanlariKontrolEt() {
     }
 }
 
-// Bulut sunucusunun kapanmaması ve her 5 dakikada bir (300.000 milisaniye) otomatik çalışması için döngü
+// 5 dakikada bir otomatik çalışma döngüsü
 ilanlariKontrolEt();
 setInterval(ilanlariKontrolEt, 300000);
 
-// Render platformunun kapanmaması için basit bir web portu açıyoruz
-const express = require('express');
-const app = express();
-app.get('/', (req, res) => res.send('Amanvermez Bot Aktif ve Çalışıyor!'));
-app.listen(process.env.PORT || 3000);
+// Sunucu açık kalma ayarı
+const server = express();
+server.get('/', (req, res) => res.send('Amanvermez Bot Aktif ve Çalışıyor!'));
+server.listen(process.env.PORT || 3000);
