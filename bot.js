@@ -1,10 +1,9 @@
-﻿const axios = require('axios');
-const cheerio = require('cheerio');
+﻿const puppeteer = require('puppeteer');
 const { initializeApp } = require('firebase/app');
 const { getDatabase, ref, query, orderByChild, equalTo, get, push } = require('firebase/database');
 const express = require('express');
 
-// Sizin Ofis Paneline Ait Tam Firebase Yapılandırması (Şifre istemez)
+// Firebase Yapılandırması
 const firebaseConfig = {
     apiKey: "AIzaSyB1Ucw0oOV6JlWUwgPuOgv2Iou_jQumtmQ",
     authDomain: "emlak-panel.firebaseapp.com",
@@ -15,7 +14,6 @@ const firebaseConfig = {
     appId: "1:465170015059:web:0050cbec9b3506e86f37a6"
 };
 
-// Firebase Başlatma
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 const portfoyRef = ref(db, 'emlak_portfoyleri');
@@ -23,78 +21,96 @@ const portfoyRef = ref(db, 'emlak_portfoyleri');
 const TARGET_URL = "https://www.sahibinden.com/kiralik/osmaniye-merkez/sahibinden";
 
 async function ilanlariKontrolEt() {
-    console.log(`[${new Date().toLocaleString('tr-TR')}] Osmaniye Merkez ilanları kontrol ediliyor...`);
+    console.log(`[${new Date().toLocaleString('tr-TR')}] Puppeteer ile Osmaniye Merkez ilanları taranıyor...`);
+    let browser;
     try {
-        const response = await axios.get(TARGET_URL, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-                'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
-            }
+        // Bulut sunucusunda çalışabilmesi için özel argümanlarla Chrome'u başlatıyoruz
+        browser = await puppeteer.launch({
+            headless: "new",
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled'
+            ]
         });
 
-        const $ = cheerio.load(response.data);
-        const ilanSatirlari = $('tr.searchResultsItem');
+        const page = await browser.newPage();
+        
+        // Gerçek insan taklidi için User-Agent ve ekran boyutu ayarları
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1366, height: 768 });
 
-        if (ilanSatirlari.length === 0) {
-            console.log("⚠️ Sahibinden güvenlik duvarına takılmış olabilir veya ilan bulunamadı.");
-            return;
+        // Sayfaya git ve tamamen yüklenmesini bekle
+        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        // İlan satırlarını sayfadan çekiyoruz
+        const ilanlar = await page.evaluate(() => {
+            const rows = document.querySelectorAll('tr.searchResultsItem');
+            const data = [];
+            rows.forEach(row => {
+                const id = row.getAttribute('data-id');
+                if (!id) return;
+
+                const baslikEl = row.querySelector('td.searchResultsTitleValue a');
+                const fiyatEl = row.querySelector('td.searchResultsPriceValue');
+                const tds = row.querySelectorAll('td');
+
+                if (baslikEl) {
+                    data.push({
+                        ilanNo: id.trim(),
+                        baslik: baslikEl.innerText.replace(/\s+/g, ' ').trim().toUpperCase(),
+                        fiyat: fiyatEl ? fiyatEl.innerText.replace(/\s+/g, ' ').trim().replace(" TL", "") : "0",
+                        metrekare: tds[4] ? tds[4].innerText.trim() : "Belirtilmemiş",
+                        odaSayisi: tds[5] ? tds[5].innerText.trim() : "2+1"
+                    });
+                }
+            });
+            return data;
+        });
+
+        console.log(`Sayfada ${ilanlar.length} adet ilan bulundu. Veritabanı kontrolü yapılıyor...`);
+
+        if (ilanlar.length === 0) {
+            console.log("⚠️ Sayfa içeriği okunamadı (Engelleme veya Boş içerik).");
         }
 
-        ilanSatirlari.each(async (index, element) => {
-            const ilanNo = $(element).attr('data-id');
-            if (!ilanNo) return;
-
-            const baslikElement = $(element).find('td.searchResultsTitleValue a');
-            if (!baslikElement.length) return;
-            let ilanBaslik = baslikElement.text().replace(/\s+/g, ' ').trim().toUpperCase();
-
-            const fiyatElement = $(element).find('td.searchResultsPriceValue');
-            let fiyat = fiyatElement ? fiyatElement.text().replace(/\s+/g, ' ').trim().replace(" TL", "") : "0";
-
-            const hucreler = $(element).find('td');
-            let metrekare = "Belirtilmemiş";
-            let odaSayisi = "2+1";
-
-            if (hucreler.length >= 6) {
-                metrekare = $(hucreler[4]).text().trim();
-                odaSayisi = $(hucreler[5]).text().trim();
-            }
-
-            // Hafifletilmiş Yeni Sorgu Mantığı
-            const ilanSorgu = query(portfoyRef, orderByChild('ilan_no'), equalTo(ilanNo));
+        for (const ilan of ilanlar) {
+            const ilanSorgu = query(portfoyRef, orderByChild('ilan_no'), equalTo(ilan.ilanNo));
             const snapshot = await get(ilanSorgu);
 
             if (!snapshot.exists()) {
                 const yeniPortfoy = {
-                    ilan_baslik: "🔴 [OTOMATİK] " + ilanBaslik,
-                    oda_sayisi: odaSayisi,
-                    metrekare: metrekare,
+                    ilan_baslik: "🔴 [OTOMATİK] " + ilan.baslik,
+                    oda_sayisi: ilan.odaSayisi,
+                    metrekare: ilan.metrekare,
                     kat_numarasi: "Bulut Bot",
-                    fiyat: fiyat,
+                    fiyat: ilan.fiyat,
                     portfoy_durumu: "KİRALIK",
-                    ilan_no: ilanNo,
+                    ilan_no: ilan.ilanNo,
                     sahip_bilgi: "SAHİBİNDEN (BULUT)",
                     adres: "OSMANİYE / MERKEZ",
-                    notlar: "7/24 Bulut sistemi tarafından otomatik yakalanan ilan.",
+                    notlar: "7/24 Canlı bulut tarayıcısı tarafından yakalandı.",
                     tarih: new Date().toLocaleString('tr-TR'),
                     timestamp: Date.now()
                 };
 
                 await push(portfoyRef, yeniPortfoy);
-                console.log(`✅ Havuza yeni ilan eklendi: No ${ilanNo} - ${ilanBaslik}`);
+                console.log(`✅ Havuza yeni ilan eklendi: No ${ilan.ilanNo}`);
             }
-        });
+        }
 
     } catch (error) {
-        console.error("Hata oluştu:", error.message);
+        console.error("Tarama esnasında hata oluştu:", error.message);
+    } finally {
+        if (browser) await browser.close();
     }
 }
 
-// 5 dakikada bir otomatik çalışma döngüsü
+// 5 dakikada bir çalıştır
 ilanlariKontrolEt();
 setInterval(ilanlariKontrolEt, 300000);
 
-// Sunucu açık kalma ayarı
+// Render web portu
 const server = express();
-server.get('/', (req, res) => res.send('Amanvermez Bot Aktif ve Çalışıyor!'));
+server.get('/', (req, res) => res.send('Amanvermez Canlı Bot Aktif!'));
 server.listen(process.env.PORT || 3000);
